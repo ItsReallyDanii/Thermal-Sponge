@@ -30,30 +30,50 @@ def safe_get(metrics, *possible_keys, default=0.0):
             return float(metrics[k])
     return default
 
-def compute_physics_loss(batch_imgs):
-    """Compute permeability + porosity regularization losses."""
+def compute_physics_loss(batch_imgs, real_stats_path="results/flow_metrics/flow_metrics.csv"):
+    """
+    Computes physics-informed loss using dynamically calibrated targets
+    from the real xylem dataset statistics.
+    """
+
+    # --- 1️⃣ Try to load real-world reference means ---
+    K_target, P_target = 0.5, 0.9  # sensible defaults
+    if os.path.exists(real_stats_path):
+        import pandas as pd
+        try:
+            df = pd.read_csv(real_stats_path)
+            real_rows = df[df["type"].str.lower() == "real"] if "type" in df.columns else df
+            K_col = [c for c in df.columns if "mean" in c.lower() and "k" in c.lower()]
+            P_col = [c for c in df.columns if "porosity" in c.lower()]
+            if not real_rows.empty:
+                if K_col:
+                    K_target = float(real_rows[K_col[0]].mean())
+                if P_col:
+                    P_target = float(real_rows[P_col[0]].mean())
+        except Exception as e:
+            print(f"⚠️ Could not auto-calibrate targets: {e}")
+
+    # --- 2️⃣ Compute flow metrics for synthetic batch ---
     K_list, P_list = [], []
     for img_tensor in batch_imgs:
         img_np = img_tensor.detach().cpu().squeeze().numpy()
-        metrics = compute_flow_metrics(img_np)
-
-        K_val = safe_get(metrics, "Mean_K", "mean_k", "K", default=0.0)
-        P_val = safe_get(metrics, "Porosity", "porosity", default=0.0)
-
-        if np.isnan(K_val) or np.isnan(P_val):
+        try:
+            metrics = compute_flow_metrics(img_np)
+            keys = {k.lower(): v for k, v in metrics.items()}
+            K_val = keys.get("mean_k", keys.get("k", 0.0))
+            P_val = keys.get("porosity", 0.0)
+        except Exception as e:
+            print(f"⚠️ Flow metric computation failed: {e}")
             K_val, P_val = 0.0, 0.0
-
         K_list.append(K_val)
         P_list.append(P_val)
 
+    # --- 3️⃣ Compute mean physics stats & loss ---
     K_mean, P_mean = np.mean(K_list), np.mean(P_list)
-
-    # Target values for realistic xylem flow
-    K_target, P_target = 0.5, 0.9
     K_loss = (K_mean - K_target) ** 2
     P_loss = (P_mean - P_target) ** 2
-
     phys_loss = K_loss + P_loss
+
     return phys_loss, K_mean, P_mean
 
 def main():
