@@ -135,8 +135,6 @@ python3 src/analyze_latent.py
 python3 src/optimize_structures.py
 python3 src/synthetic_cambium.py
 python3 src/morpho_analysis.py
-Outputs are stored in /results/, automatically organized by phase.
-
 
 
 ### 🧬 **Future Extensions**
