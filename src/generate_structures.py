@@ -1,58 +1,73 @@
 import os
 import argparse
-import torch
 import numpy as np
-from torchvision.utils import save_image
-from tqdm import tqdm
-from src.model import XylemAutoencoder  # or your model class
+from PIL import Image
+import torch
+from torch import nn
+from src.model import XylemAutoencoder
 import pandas as pd
 
+
+def save_image_from_tensor(tensor, path):
+    """
+    Save a single-channel tensor [1,H,W] or [H,W] as a grayscale PNG using PIL.
+    Assumes values are in [0, 1].
+    """
+    if tensor.ndim == 3:
+        tensor = tensor.squeeze(0)  # [1,H,W] -> [H,W]
+    arr = tensor.detach().cpu().numpy()
+    arr = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+    img = Image.fromarray(arr, mode="L")
+    img.save(path)
+
+
 def generate_structures(model_path, n=64, out_dir="data/generated_microtubes"):
-    os.makedirs(out_dir, exist_ok=True)
+    """
+    Load a tuned autoencoder model and generate N synthetic microtubes
+    by sampling latent vectors from a standard normal distribution,
+    decoding them to images, and saving them as PNGs.
+    Also logs latent vectors for analysis.
+    """
+    device = torch.device("cpu")
 
     # Load model
     model = XylemAutoencoder()
-    state_dict = torch.load(model_path, map_location="cpu")
+    state_dict = torch.load(model_path, map_location=device)
     model.load_state_dict(state_dict)
+    model.to(device)
     model.eval()
 
-    # Create latent samples
-    latent_dim = model.latent_dim if hasattr(model, "latent_dim") else 128
-    z = torch.randn(n, latent_dim)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Latent dimension inferred from model
+    latent_dim = model.latent_dim if hasattr(model, "latent_dim") else 32
 
     generated = []
-    print(f"🧩 Generating {n} synthetic structures...")
-    for i in tqdm(range(n)):
-        with torch.no_grad():
-            img = model.decode(z[i].unsqueeze(0)).cpu()
-        img = img.squeeze().numpy()
+    with torch.no_grad():
+        for i in range(n):
+            # Sample a random latent code
+            z = torch.randn(1, latent_dim, device=device)
 
-        # Normalize & enhance contrast
-        img = (img - img.min()) / (img.max() - img.min() + 1e-8)
-        img = np.clip(img * 1.2, 0, 1)  # slight contrast boost
-        img_torch = torch.tensor(img).unsqueeze(0)
+            # Decode to image
+            recon = model.decode(z)  # [1,1,256,256]
+            img_tensor = recon[0, 0]  # [H,W]
 
-        # Save
-        out_path = os.path.join(out_dir, f"synthetic_{i+1:03d}.png")
-        save_image(img_torch, out_path)
+            # Save to disk
+            filename = f"synthetic_{i:03d}.png"
+            filepath = os.path.join(out_dir, filename)
+            save_image_from_tensor(img_tensor, filepath)
 
-        # Log metrics
-        porosity = float((img > 0.5).mean())
-        intensity_mean = float(img.mean())
-        intensity_var = float(img.var())
+            generated.append({
+                "filename": filename,
+                "z": z.detach().cpu().numpy().flatten().tolist()
+            })
 
-        generated.append({
-            "filename": f"synthetic_{i+1:03d}.png",
-            "porosity_est": porosity,
-            "intensity_mean": intensity_mean,
-            "intensity_var": intensity_var
-        })
-
-    # Save metadata
+    # Save latent log as CSV/JSON-ish
     log_path = os.path.join(out_dir, "generation_log.csv")
     pd.DataFrame(generated).to_csv(log_path, index=False)
     print(f"✅ Generated {n} structures in {out_dir}")
     print(f"🧾 Generation log saved → {log_path}")
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -61,6 +76,7 @@ def main():
     args = parser.parse_args()
 
     generate_structures(args.model, args.n)
+
 
 if __name__ == "__main__":
     main()

@@ -1,16 +1,21 @@
 """
-train_physics_informed.py
+train_physics_informed.py  (v0.2 – surrogate-based)
 
-Physics-informed fine-tuning of the XylemAutoencoder using
-differentiable proxy metrics for porosity and flow.
+Fine-tune the XylemAutoencoder using a learned physics surrogate.
 
-- Real-xylem images are used ONCE at startup to compute
-  target proxy values (porosity_proxy, flow_proxy).
-- During training, the autoencoder reconstructions are
-  penalized if their proxy metrics deviate from those targets.
-
-Evaluation with the full flow solver still happens separately
-via `flow_simulation.py` + `analyze_flow_metrics.py`.
+Pipeline:
+  - Load autoencoder (results/model_hybrid.pth)
+  - Load physics surrogate CNN (results/physics_surrogate.pth)
+  - Load generated microtubes as training images
+  - Load REAL xylem solver stats as physics targets from
+    results/flow_metrics/flow_metrics.csv  (Type == "Real")
+  - For each epoch:
+      recon = AE(imgs)
+      pred_metrics = surrogate(recon)
+      physics_loss = (mean(pred_metrics) - real_targets)^2
+      total_loss = recon_loss + λ * physics_loss
+  - Save tuned AE to results/model_physics_tuned.pth
+  - Save full training log to results/physics_training_log.csv
 """
 
 import os
@@ -24,202 +29,188 @@ import torch.optim as optim
 
 from src.model import XylemAutoencoder
 
-# -----------------------------------------------------------------------
-# Config
-# -----------------------------------------------------------------------
-
+DEVICE = torch.device("cpu")
 TARGET_SIZE = (256, 256)
-DEVICE = torch.device("cpu")   # Camber/Jupyter CPU
 
-REAL_XYLEM_DIRS = [
-    "data/real_xylem_preprocessed",
-    "data/real_xylem",
-]
-
-
-# -----------------------------------------------------------------------
-# Utilities
-# -----------------------------------------------------------------------
-
-def load_images_as_tensor(path: str) -> torch.Tensor:
-    """
-    Load and resize all grayscale images from a folder to consistent size.
-    Returns [N,1,H,W] in [0,1].
-    """
+# ----------------------------------------------------
+# Data loading
+# ----------------------------------------------------
+def load_and_preprocess_images(path):
+    """Load and resize all grayscale images from a folder to consistent size."""
     imgs = []
-    if not os.path.isdir(path):
-        return None
-
     for f in sorted(os.listdir(path)):
         if f.lower().endswith((".png", ".jpg", ".jpeg", ".tif")):
             img = Image.open(os.path.join(path, f)).convert("L")
             img = img.resize(TARGET_SIZE, Image.BILINEAR)
             arr = np.array(img, dtype=np.float32) / 255.0
-            imgs.append(torch.tensor(arr).unsqueeze(0))  # [1,H,W]
-
+            imgs.append(torch.from_numpy(arr).unsqueeze(0))  # [1, H, W]
     if not imgs:
-        return None
-
-    return torch.stack(imgs)  # [N,1,H,W]
-
-
-def compute_proxy_targets_from_real() -> tuple[float, float]:
-    """
-    Compute target proxy values (porosity_proxy, flow_proxy)
-    from real-xylem images using only differentiable-style ops.
-
-    Returns:
-        porosity_target, flow_target (floats)
-    """
-    real_imgs = None
-    for d in REAL_XYLEM_DIRS:
-        real_imgs = load_images_as_tensor(d)
-        if real_imgs is not None:
-            print(f"📂 Loaded real xylem images from: {d}")
-            break
-
-    if real_imgs is None:
-        # Fallback: reasonable defaults if real set is missing
-        print("⚠️ No real xylem images found; using default proxy targets.")
-        return 0.99, 0.01
-
-    real_imgs = real_imgs.to(DEVICE)
-
-    with torch.no_grad():
-        # Porosity proxy: mean brightness
-        porosity_proxy = real_imgs.mean()
-
-        # Flow proxy: average gradient magnitude in x and y
-        grad_y = real_imgs[:, :, 1:, :] - real_imgs[:, :, :-1, :]
-        grad_x = real_imgs[:, :, :, 1:] - real_imgs[:, :, :, :-1]
-        flow_proxy = (grad_x.abs().mean() + grad_y.abs().mean())
-
-    porosity_target = float(porosity_proxy.item())
-    flow_target = float(flow_proxy.item())
-
-    print(f"🎯 Proxy targets from real xylem:")
-    print(f"   Porosity_proxy_target ≈ {porosity_target:.6f}")
-    print(f"   Flow_proxy_target     ≈ {flow_target:.6f}")
-
-    return porosity_target, flow_target
+        raise RuntimeError(f"No images found in {path}")
+    return torch.stack(imgs)  # [N, 1, H, W]
 
 
-def physics_proxy_loss(
-    recon: torch.Tensor,
-    porosity_target: float,
-    flow_target: float,
-):
-    """
-    Differentiable physics proxy loss computed directly on reconstructions.
-
-    Args:
-        recon: [N,1,H,W] tensor in [0,1]
-        porosity_target: scalar target for mean brightness
-        flow_target:     scalar target for gradient magnitude proxy
-
-    Returns:
-        phys_loss: torch scalar with gradient
-        porosity_proxy_val: float (for logging)
-    """
-    # Porosity proxy: mean brightness
-    porosity_proxy = recon.mean()
-
-    # Flow proxy: gradient magnitude
-    grad_y = recon[:, :, 1:, :] - recon[:, :, :-1, :]
-    grad_x = recon[:, :, :, 1:] - recon[:, :, :, :-1]
-    flow_proxy = (grad_x.abs().mean() + grad_y.abs().mean())
-
-    eps = 1e-8
-    p_loss = ((porosity_proxy - porosity_target) / (porosity_target + eps)) ** 2
-    f_loss = ((flow_proxy - flow_target) / (flow_target + eps)) ** 2
-
-    # Weights can be tuned; start symmetric
-    w_p = 1.0
-    w_f = 1.0
-
-    phys_loss = w_p * p_loss + w_f * f_loss
-
-    return phys_loss, float(porosity_proxy.item())
-
-
-# -----------------------------------------------------------------------
-# Main training loop
-# -----------------------------------------------------------------------
-
-def main():
-    print("🌱 Physics-proxy fine-tuning started on", DEVICE)
-
-    # 1) Load model
-    model = XylemAutoencoder().to(DEVICE)
-    model.load_state_dict(torch.load("results/model_hybrid.pth", map_location=DEVICE))
-    model.train()
-
-    # 2) Compute proxy targets from real xylem
-    porosity_target, flow_target = compute_proxy_targets_from_real()
-
-    # 3) Load synthetic training data
-    data_path = "data/generated_microtubes"
-    synth_imgs = load_images_as_tensor(data_path)
-    if synth_imgs is None:
-        raise RuntimeError(f"No synthetic images found in {data_path}")
-    synth_imgs = synth_imgs.to(DEVICE)
-    print(f"🧩 Loaded {len(synth_imgs)} generated structures → resized to {TARGET_SIZE}")
-
-    recon_loss_fn = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
-
-    logs = []
-
-    for epoch in range(1, 101):
-        optimizer.zero_grad()
-
-        recon, _ = model(synth_imgs)
-        recon_loss = recon_loss_fn(recon, synth_imgs)
-
-        phys_loss, porosity_proxy_val = physics_proxy_loss(
-            recon,
-            porosity_target=porosity_target,
-            flow_target=flow_target,
+# ----------------------------------------------------
+# Surrogate model (must match train_physics_surrogate.py)
+# ----------------------------------------------------
+class PhysicsSurrogateCNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1),   # 256 → 128
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),  # 128 → 64
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),  # 64 → 32
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1), # 32 → 16
+            nn.ReLU(inplace=True),
         )
 
-        # Dynamic physics weighting (same schedule idea as before)
-        weight_phys = 0.5 + 5 * (1 - np.exp(-epoch / 30.0))
-        total_loss = recon_loss + weight_phys * phys_loss
+        # 🔧 IMPORTANT: match the architecture used during surrogate training
+        self.head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128 * 16 * 16, 256),  # 32768 → 256
+            nn.ReLU(inplace=True),
+            nn.Linear(256, 5),             # 256 → 5
+        )
 
+    def forward(self, x):
+        x = self.features(x)
+        x = self.head(x)
+        return x
+
+
+
+# ----------------------------------------------------
+# Load real-physics targets from flow_metrics.csv
+# ----------------------------------------------------
+def load_real_targets(flow_metrics_path="results/flow_metrics/flow_metrics.csv"):
+    """
+    Reads solver stats and returns mean targets for:
+    [Mean_K, Mean_dP/dy, FlowRate, Porosity, Anisotropy] for REAL samples.
+    """
+    if not os.path.exists(flow_metrics_path):
+        raise FileNotFoundError(
+            f"Flow metrics file not found at {flow_metrics_path}. "
+            "Run flow_simulation.py + flow_metrics_export first."
+        )
+
+    df = pd.read_csv(flow_metrics_path)
+    if "Type" in df.columns:
+        df_real = df[df["Type"].str.lower() == "real"]
+    else:
+        df_real = df
+
+    cols = ["Mean_K", "Mean_dP/dy", "FlowRate", "Porosity", "Anisotropy"]
+    missing = [c for c in cols if c not in df_real.columns]
+    if missing:
+        raise ValueError(f"Missing expected columns in flow_metrics.csv: {missing}")
+
+    targets_np = df_real[cols].mean(axis=0).to_numpy(dtype=np.float32)
+    print("🎯 Real-physics targets from solver:")
+    for name, val in zip(cols, targets_np):
+        print(f"   {name:12s} ≈ {val:.6f}")
+
+    return torch.from_numpy(targets_np).to(DEVICE), cols
+
+
+# ----------------------------------------------------
+# Main training loop
+# ----------------------------------------------------
+def main():
+    print("🌱 Surrogate-based physics fine-tuning started on cpu")
+
+    # 1) Load autoencoder
+    ae = XylemAutoencoder().to(DEVICE)
+    ae.load_state_dict(torch.load("results/model_hybrid.pth", map_location=DEVICE))
+    ae.train()
+
+    # 2) Load fixed surrogate
+    surrogate = PhysicsSurrogateCNN().to(DEVICE)
+    surrogate.load_state_dict(torch.load("results/physics_surrogate.pth", map_location=DEVICE))
+    surrogate.eval()
+    for p in surrogate.parameters():
+        p.requires_grad = False  # freeze weights; we only backprop through AE
+
+    # 3) Load physics targets from REAL xylem solver metrics
+    target_vec, metric_names = load_real_targets("results/flow_metrics/flow_metrics.csv")
+
+    # 4) Load training images (synthetic microtubes)
+    data_path = "data/generated_microtubes"
+    imgs = load_and_preprocess_images(data_path).to(DEVICE)
+    print(f"🧩 Loaded {imgs.shape[0]} generated structures → resized to {TARGET_SIZE}")
+
+    recon_loss_fn = nn.MSELoss()
+    optimizer = optim.Adam(ae.parameters(), lr=1e-4)
+
+    logs = []
+    num_epochs = 100
+    lambda_phys_start = 1.0
+    lambda_phys_end = 10.0
+
+    for epoch in range(1, num_epochs + 1):
+        optimizer.zero_grad()
+
+        recon, _ = ae(imgs)
+        recon_loss = recon_loss_fn(recon, imgs)
+
+        # Surrogate predictions on reconstructions: [B, 5]
+        pred_metrics = surrogate(recon)
+        pred_mean = pred_metrics.mean(dim=0)  # [5]
+
+        # Physics loss: mean squared error vs real targets
+        phys_loss = ((pred_mean - target_vec) ** 2).mean()
+
+        # Gradually ramp physics weight
+        t = epoch / num_epochs
+        lambda_phys = lambda_phys_start + (lambda_phys_end - lambda_phys_start) * t
+
+        total_loss = recon_loss + lambda_phys * phys_loss
         total_loss.backward()
         optimizer.step()
 
-        # Gradient norm for logging
+        # Gradient norm for monitoring
         grad_norm = 0.0
-        for p in model.parameters():
+        for p in ae.parameters():
             if p.grad is not None:
                 grad_norm += p.grad.norm().item()
+        grad_norm = float(grad_norm)
 
-        logs.append({
+        # Log
+        log_row = {
             "epoch": epoch,
-            "total": total_loss.item(),
-            "recon": recon_loss.item(),
-            "phys": phys_loss.item(),
-            "PorosityProxy": porosity_proxy_val,
+            "total": float(total_loss.item()),
+            "recon": float(recon_loss.item()),
+            "phys": float(phys_loss.item()),
+            "lambda_phys": float(lambda_phys),
             "GradNorm": grad_norm,
-        })
+        }
+        # Also stash the current mean metrics (detached to CPU)
+        for name, val in zip(metric_names, pred_mean.detach().cpu().numpy()):
+            log_row[f"pred_{name}"] = float(val)
 
-        if epoch % 5 == 0 or epoch == 1:
+        logs.append(log_row)
+
+        if epoch == 1 or epoch % 5 == 0:
+            metrics_str = " | ".join(
+                f"{name}: {log_row[f'pred_{name}']:.5f}" for name in metric_names
+            )
             print(
-                f"Epoch {epoch:3d}/100 | "
-                f"Total: {total_loss.item():.5f} | "
-                f"Recon: {recon_loss.item():.5f} | "
-                f"Phys: {phys_loss.item():.5f} | "
-                f"PorosityProxy: {porosity_proxy_val:.5f} | "
+                f"Epoch {epoch:3d}/{num_epochs} | "
+                f"Total: {log_row['total']:.5f} | "
+                f"Recon: {log_row['recon']:.5f} | "
+                f"Phys: {log_row['phys']:.5f} | "
+                f"λ_phys: {lambda_phys:.2f} | "
+                f"{metrics_str} | "
                 f"GradNorm: {grad_norm:.2e}"
             )
 
-    # 4) Save results
+    # 5) Save tuned model + log
     os.makedirs("results", exist_ok=True)
-    torch.save(model.state_dict(), "results/model_physics_tuned.pth")
+    torch.save(ae.state_dict(), "results/model_physics_tuned.pth")
     pd.DataFrame(logs).to_csv("results/physics_training_log.csv", index=False)
 
-    print("✅ Physics-proxy fine-tuning complete.")
+    print("✅ Surrogate-based physics fine-tuning complete.")
     print("💾 Model saved → results/model_physics_tuned.pth")
     print("🧾 Training log saved → results/physics_training_log.csv")
 
