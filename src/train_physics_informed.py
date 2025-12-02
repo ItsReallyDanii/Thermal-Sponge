@@ -1,5 +1,5 @@
 """
-train_physics_informed.py  (v0.3 – physics-dominant, surrogate-based)
+train_physics_informed.py  (v0.4 – physics-dominant, porosity-weighted)
 
 Fine-tune the XylemAutoencoder using a learned physics surrogate.
 
@@ -12,7 +12,8 @@ Pipeline:
   - For each epoch:
       recon = AE(imgs)
       pred_metrics = surrogate(recon)
-      physics_loss = (mean(pred_metrics) - real_targets)^2
+      physics_loss = weighted sum of per-metric squared errors, with
+                     porosity error upweighted
       total_loss = RECON_WEIGHT * recon_loss + λ_phys * physics_loss
   - Save tuned AE to results/model_physics_tuned.pth
   - Save full training log to results/physics_training_log.csv
@@ -28,17 +29,31 @@ import torch.nn as nn
 import torch.optim as optim
 
 from src.model import XylemAutoencoder
-from src.train_surrogate import PhysicsSurrogateCNN  # <-- single source of truth
+from src.train_surrogate import PhysicsSurrogateCNN  # single source of truth
 
 DEVICE = torch.device("cpu")
 TARGET_SIZE = (256, 256)
 
+# --------------------
+# Loss weights
+# --------------------
 # How much we care about pixel-wise reconstruction vs physics.
 # Physics-dominant: recon is down-weighted, physics is up-weighted.
 RECON_WEIGHT = 0.1          # was 1.0 before
-LAMBDA_PHYS_START = 3.0     # ramp start
-LAMBDA_PHYS_END = 20.0      # ramp end
+
+# Global ramp for physics influence over epochs
+LAMBDA_PHYS_START = 3.0
+LAMBDA_PHYS_END   = 20.0
+
 NUM_EPOCHS = 100
+
+# Per-metric physics weights
+# (Names correspond to columns: Mean_K, Mean_dP/dy, FlowRate, Porosity, Anisotropy)
+K_WEIGHT        = 1.0   # permeability
+DPDY_WEIGHT     = 1.0   # pressure gradient
+FLOW_WEIGHT     = 1.0   # flowrate
+POROSITY_WEIGHT = 10.0  # aggressively push porosity toward target
+ANISO_WEIGHT    = 1.0   # anisotropy
 
 
 # ----------------------------------------------------
@@ -88,7 +103,8 @@ def load_real_targets(flow_metrics_path: str = "results/flow_metrics/flow_metric
     for name, val in zip(cols, targets_np):
         print(f"   {name:12s} ≈ {val:.6f}")
 
-    return torch.from_numpy(targets_np).to(DEVICE), cols
+    targets = torch.from_numpy(targets_np).to(DEVICE)
+    return targets, cols
 
 
 # ----------------------------------------------------
@@ -112,6 +128,9 @@ def main():
     # 3) Load physics targets from REAL xylem solver metrics
     target_vec, metric_names = load_real_targets("results/flow_metrics/flow_metrics.csv")
 
+    # Map metric names to indices for clarity
+    metric_index = {name: i for i, name in enumerate(metric_names)}
+
     # 4) Load training images (synthetic microtubes)
     data_path = "data/generated_microtubes"
     imgs = load_and_preprocess_images(data_path).to(DEVICE)
@@ -125,6 +144,7 @@ def main():
     for epoch in range(1, NUM_EPOCHS + 1):
         optimizer.zero_grad()
 
+        # Forward through AE
         recon, _ = ae(imgs)
         recon_loss = recon_loss_fn(recon, imgs)
 
@@ -132,14 +152,30 @@ def main():
         pred_metrics = surrogate(recon)
         pred_mean = pred_metrics.mean(dim=0)  # [5]
 
-        # Physics loss: mean squared error vs real targets
-        phys_loss = ((pred_mean - target_vec) ** 2).mean()
+        # Physics error vector
+        diff = pred_mean - target_vec  # [5]
 
-        # Gradually ramp physics weight (stronger than before)
+        # Extract per-metric squared errors by name
+        loss_k    = diff[metric_index["Mean_K"]]      ** 2
+        loss_dpdy = diff[metric_index["Mean_dP/dy"]]  ** 2
+        loss_flow = diff[metric_index["FlowRate"]]    ** 2
+        loss_por  = diff[metric_index["Porosity"]]    ** 2
+        loss_aniso= diff[metric_index["Anisotropy"]]  ** 2
+
+        # Weighted physics loss (porosity emphasized)
+        phys_loss = (
+            K_WEIGHT        * loss_k
+            + DPDY_WEIGHT   * loss_dpdy
+            + FLOW_WEIGHT   * loss_flow
+            + POROSITY_WEIGHT * loss_por
+            + ANISO_WEIGHT  * loss_aniso
+        )
+
+        # Gradually ramp global physics weight
         t = epoch / NUM_EPOCHS
         lambda_phys = LAMBDA_PHYS_START + (LAMBDA_PHYS_END - LAMBDA_PHYS_START) * t
 
-        # Physics-dominant total loss
+        # Total loss: recon is down-weighted, physics dominates
         total_loss = RECON_WEIGHT * recon_loss + lambda_phys * phys_loss
         total_loss.backward()
         optimizer.step()
@@ -155,11 +191,16 @@ def main():
         log_row = {
             "epoch": epoch,
             "total": float(total_loss.item()),
-            # log the *unscaled* recon + phys for interpretability
+            # log the *unscaled* recon + weighted physics for interpretability
             "recon": float(recon_loss.item()),
             "phys": float(phys_loss.item()),
             "lambda_phys": float(lambda_phys),
             "recon_weight": float(RECON_WEIGHT),
+            "loss_K": float(loss_k.item()),
+            "loss_dPdy": float(loss_dpdy.item()),
+            "loss_Flow": float(loss_flow.item()),
+            "loss_Porosity": float(loss_por.item()),
+            "loss_Anisotropy": float(loss_aniso.item()),
             "GradNorm": grad_norm,
         }
         # Also stash the current mean metrics (detached to CPU)
@@ -176,8 +217,8 @@ def main():
                 f"Epoch {epoch:3d}/{NUM_EPOCHS} | "
                 f"Total: {log_row['total']:.5f} | "
                 f"Recon(unscaled): {log_row['recon']:.5f} | "
-                f"Phys: {log_row['phys']:.5f} | "
-                f"λ_phys: {lambda_phys:.2f} | "
+                f"Phys(weighted): {log_row['phys']:.5f} | "
+                f"λ_phys: {log_row['lambda_phys']:.2f} | "
                 f"{metrics_str} | "
                 f"GradNorm: {grad_norm:.2e}"
             )
