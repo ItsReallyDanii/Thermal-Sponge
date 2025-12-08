@@ -32,9 +32,13 @@ IMG_EXTS = (".png", ".jpg", ".jpeg", ".tif")
 # Adjusted threshold for Robust Normalized images:
 # After normalization, 0.5 is the median gray. 
 # Anything brighter than 0.6 is VOID (Water/Air). Darker is SOLID (Metal).
-VOID_THRESHOLD = 0.60   
-K_SOLID = 1.0           # relative conductivity of solid (Metal)
-K_VOID = 0.05           # relative conductivity of void (Water/Air)
+from src.constants import VOID_THRESHOLD, K_SOLID, K_VOID
+
+# Image → material mapping
+# Adjusted threshold for Robust Normalized images:
+# After normalization, 0.5 is the median gray. 
+# Anything brighter than 0.6 is VOID (Water/Air). Darker is SOLID (Metal).
+# Constants are now imported from src.constants
 
 # Thermal BCs
 T_HOT = 1.0

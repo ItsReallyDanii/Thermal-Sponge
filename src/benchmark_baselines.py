@@ -11,9 +11,9 @@ AI_METRICS_PATH = "results/thermal_metrics/thermal_metrics.csv" # Your AI result
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # PHYSICS CONSTANTS (Must match heat_simulation.py)
-VOID_THRESHOLD = 0.60
-K_SOLID = 1.0
-K_VOID = 0.05
+from src.constants import VOID_THRESHOLD, K_SOLID, K_VOID
+
+# PHYSICS CONSTANTS (Must match heat_simulation.py)
 T_HOT = 1.0
 T_COLD = 0.0
 HOT_STRIP_WIDTH = 5
