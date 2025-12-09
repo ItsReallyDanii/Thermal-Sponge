@@ -3,8 +3,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 
-MESH_FILE = "results/gradient_beam/gradient_beam_3d.stl"
-OUTPUT_IMG = "results/gradient_beam/3d_preview.png"
+MESH_FILE = "results\gradient_beam\gradient_beam_3d.stl"
+OUTPUT_IMG = "results/titanium_wood_preview.png"
 
 def main():
     if not os.path.exists(MESH_FILE):
