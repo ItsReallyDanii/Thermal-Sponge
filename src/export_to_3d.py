@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import trimesh
-from skimage import measure
+# from skimage import measure # Removed dependency
 from PIL import Image
 import matplotlib.pyplot as plt
 
@@ -42,29 +42,34 @@ def create_voxel_volume(binary_slice, depth):
     return volume
 
 def export_stl(volume, output_path):
-    print("🕸️  Running Marching Cubes (Voxel -> Mesh)...")
+    print("🕸️  Running Voxel -> Mesh via Trimesh (Box Mode)...")
     
-    # Marching Cubes algorithm (finds the surface of the 3D blob)
-    # volume is boolean (True/False). Level=0.5 finds the boundary.
+    # Use Trimesh's box generation (scipy-free fallback)
     try:
-        verts, faces, normals, values = measure.marching_cubes(volume, level=0.5)
+        # Create VoxelGrid from boolean volume
+        # Trimesh 4.x handles boolean array via DenseEncoding
+        encoding = trimesh.voxel.encoding.DenseEncoding(volume)
+        grid = trimesh.voxel.VoxelGrid(encoding)
         
-        # Scale vertices (Optional)
-        verts = verts * VOXEL_SIZE
+        # Convert to mesh (one box per solid voxel)
+        mesh = grid.as_boxes()
         
-        # Create Mesh object
-        mesh = trimesh.Trimesh(vertices=verts, faces=faces)
-        
-        # Fix normals (make it look smooth)
-        mesh.fix_normals()
+        # Scale the mesh to match VOXEL_SIZE
+        # as_boxes creates unit cubes at integer coordinates
+        matrix = np.eye(4)
+        matrix[:3, :3] *= VOXEL_SIZE
+        mesh.apply_transform(matrix)
+            
+        # Fix normals not strictly needed for boxes as they are valid, but good practice
+        # mesh.fix_normals() # Might need scipy? Skip if risky.
         
         # Save
         mesh.export(output_path)
         print(f"✅ 3D Mesh saved to: {output_path}")
-        print(f"   Vertices: {len(verts)}, Faces: {len(faces)}")
+        print(f"   Vertices: {len(mesh.vertices)}, Faces: {len(mesh.faces)}")
         
-    except ValueError:
-        print("⚠️  Error: No surface found. Is the image empty or all solid?")
+    except Exception as e:
+        print(f"⚠️  Error during meshing: {e}")
 
 def main():
     print("🚀 Starting 2D-to-3D Conversion...")
