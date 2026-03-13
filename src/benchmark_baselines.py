@@ -79,16 +79,21 @@ def solve_steady_heat(k_grid, max_iters=2000):
 def evaluate_design(img, name):
     # Map to K
     # Img: 1.0=Void, 0.0=Solid
-    k_map = np.where(img < 0.5, K_SOLID, K_VOID)
-    
+    # CONSISTENCY FIX (checkpoint rebuild/thermal-sponge-alignment-v2):
+    #   Previously used hardcoded 0.5 threshold; now uses VOID_THRESHOLD=0.60
+    #   from constants.py, consistent with heat_simulation.py and the BITO core.
+    #   Re-running this script will produce slightly different baseline_metrics.csv
+    #   compared to the committed CSV (which was generated with the old 0.5 threshold).
+    k_map = np.where(img < VOID_THRESHOLD, K_SOLID, K_VOID)
+
     # Solve
     T = solve_steady_heat(k_map)
-    
+
     # Metrics
     dTdx = T[:, -1] - T[:, -2]
     flux = np.sum(-k_map[:, -1] * dTdx)
-    density = np.mean(img < 0.5)
-    
+    density = np.mean(img < VOID_THRESHOLD)
+
     return {"name": name, "flux": flux, "density": density}
 
 # ---------------------------------------------------------

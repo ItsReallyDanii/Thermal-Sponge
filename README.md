@@ -1,6 +1,13 @@
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18452198.svg)](https://doi.org/10.5281/zenodo.18452198)
 # Generative Porous Microstructure Design + Physics Validation (Artifact)
 
+> **Canonical core (as of checkpoint rebuild/thermal-sponge-alignment-v2):**
+> The real, runnable, trusted kernel is the **BITO pipeline** in `src/`.
+> See [CANONICAL_CORE.md](CANONICAL_CORE.md) for the architecture ground truth,
+> the exact run commands, and the explicit list of what is and is not canonical.
+> The generative/training/optimization layer exists in the repo but is **not** part
+> of the canonical BITO core for this checkpoint.
+
 This repository contains an end-to-end research prototype for generating porous microstructure images and evaluating them against engineering baselines using morphology, flow, and thermal metrics.
 
 > **Project status:** exploratory / first-pass prototype. The goal of this README is to make the repo usable as a reproducible *artifact*.
@@ -87,7 +94,7 @@ python src/repro_claims.py
 
 This reproduces the C1/C2 numeric checks from `claim_audit/*.csv` and regenerates `claim_audit/claim_map_v3.json`.
 
-**Bio-thermal orchestration (C3-C5):**
+**Bio-thermal orchestration (C3-C5) — canonical BITO path:**
 
 ```bash
 # Run transient experiments (generates orchestration_metrics.csv, sla_check.csv)
@@ -96,6 +103,15 @@ python -m src.run_thermal_orchestration
 # Reproduce all claims C1-C5 (generates claim_map_v4.json)
 python src/repro_claims_v4.py
 ```
+
+**Smoke tests (BITO core — fast, no data required):**
+
+```bash
+python -m pytest tests/test_bito_smoke.py -v
+```
+
+All 17 tests should pass in < 1 second. These cover constants, PID, FlyTrapGate,
+control metrics, the transient solver, and morphology generators.
 
 ---
 

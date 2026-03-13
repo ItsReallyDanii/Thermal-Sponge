@@ -1,4 +1,15 @@
 """
+[NON-CANONICAL — STALE DUPLICATE]
+This file is an old copy placed here by mistake. It is NOT the canonical script.
+
+Canonical scripts are:
+  src/repro_claims.py    — C1/C2 reproduction
+  src/repro_claims_v4.py — C1-C5 reproduction (use this for the full suite)
+
+Do not run this file. It may produce outdated or inconsistent outputs.
+See CANONICAL_CORE.md for the ground-truth architecture map.
+---
+
 Reproduce Claim Audit numbers from repo-relative CSVs.
 
 Expected layout (repo root):

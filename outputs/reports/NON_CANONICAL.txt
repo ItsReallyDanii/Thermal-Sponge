@@ -1,0 +1,17 @@
+NON-CANONICAL — STALE ARTIFACT CACHE
+=====================================
+
+The files in this directory (outputs/reports/) are stale copies of older
+claim_audit outputs. They are NOT the canonical claim evidence.
+
+Canonical claim artifacts are in: claim_audit/
+
+Do not use files from outputs/reports/ for verification or publication.
+Canonical files:
+  claim_audit/claim_map_v4.json    — current claim map (C1-C5)
+  claim_audit/experiment_config.json
+  claim_audit/hypothesis_config.json
+  claim_audit/orchestration_metrics.csv
+  claim_audit/sla_check.csv
+
+See CANONICAL_CORE.md at repo root for the architecture ground truth.
